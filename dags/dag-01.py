@@ -38,7 +38,7 @@ with DAG(
 
     # Создание параллельных задач
     tasks = []
-    for i in range(10):  # Количество параллельных задач
+    for i in range(20):  # Количество параллельных задач
         task = PythonOperator(
             task_id=f'compute_md5_task_{i}',
             python_callable=compute_md5
