@@ -31,13 +31,13 @@ with DAG(
     start_date=datetime(2024, 6, 1),
     catchup=False,
     default_args=default_args,
-    concurrency=5,  # Параллельное выполнение до 5 задач одновременно
+    concurrency=10,  # Параллельное выполнение до 5 задач одновременно
     max_active_runs=3,  # Ограничение на одновременные запуски DAG
 ) as dag:
 
     # Создаем 10 задач с длительным временем работы
     tasks = []
-    for i in range(10):  # 10 задач
+    for i in range(20):  # 10 задач
         task = PythonOperator(
             task_id=f'long_running_task_{i}',
             python_callable=long_running_task,
