@@ -1,6 +1,0 @@
-dags:
-  gitSync:
-    enabled: true
-    repo: https://github.com/ovitente/dags.git
-    branch: main
-    subPath: ""
