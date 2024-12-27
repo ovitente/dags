@@ -12,10 +12,10 @@ def airflow_variables_example():
     @task
     def set_airflow_variable():
         """Устанавливает переменную MY_DINNER в Airflow, если она ещё не задана."""
-        if Variable.get("MY_DINNER", default_var=None) is None:
-            Variable.set("MY_DINNER", "Chocolate")
+        if Variable.get("MAGIC_VAR", default_var=None) is None:
+            Variable.set("MAGIC_VAR", "Hello Moto")
         else:
-            Variable.update("MY_DINNER", "More Chocolate")
+            Variable.update("MAGIC_VAR", "Hurricane")
 
     set_airflow_variable()
 
