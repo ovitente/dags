@@ -18,7 +18,7 @@ def send_slack_message():
     message = f"""
     🚀 *TESTING MEEESS от Airflow DAG*
     
-    HELLO! Это тестовое сообщение, отправленное из Airflow DAG.
+    HELLO! Это тестовое ,sdas отправленное из Airflow DAG.
     
     • Время отправки: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
     • DAG ID: simple_slack_notifier
