@@ -2,14 +2,19 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from datetime import datetime, timedelta
 from slack_sdk import WebClient
+import os
 
 def send_slack_message():
     """
     Простая функция для отправки сообщения в Slack
+    Токен берется из переменной окружения SLACK_TOKEN
     """
-    # Инициализация Slack клиента
-    slack_token = "xoxe-1-My0xLTg1MDUxMzMzMDU0MTEtODQ5NzkwOTk1MjM5MC04NTAwMjA5NDg4NTgyLTdhNGM2MzUzYzc0NTA4MGRkODMyYjVmMGY2Yzc5OTYyNDY3YThjOWYwMmRkZWM4Y2ZmMDE4NDljMWFkZTlmNTY"
-    slack_channel = "#alerts"
+    # Получение токена из переменной окружения
+    slack_token = os.environ.get('SLACK_TOKEN')
+    if not slack_token:
+        raise ValueError("Переменная окружения SLACK_TOKEN не установлена")
+    
+    slack_channel = os.environ.get('SLACK_CHANNEL', '#alerts')
     
     client = WebClient(token=slack_token)
     
@@ -21,9 +26,10 @@ def send_slack_message():
     
     • Время отправки: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
     • DAG ID: simple_slack_notifier
-    • Сервер: {datetime.now().strftime('%Y%m%d')}
+    • Сервер: {os.environ.get('HOSTNAME', 'неизвестно')}
     
-    Если вы видите это сообщение, значит, настройка Slack уведомлений работает корректно! 👍
+    Если вы видите это сообщение, значит, настройка Slack уведомлений с использованием
+    переменных окружения работает корректно! 👍
     """
     
     # Отправка сообщения
@@ -53,7 +59,7 @@ default_args = {
 dag = DAG(
     'simple_slack_notifier',
     default_args=default_args,
-    description='Простой DAG для отправки сообщений в Slack',
+    description='Простой DAG для отправки сообщений в Slack с использованием переменных окружения',
     schedule_interval='@once',  # Запускается только один раз при активации
     catchup=False
 )
