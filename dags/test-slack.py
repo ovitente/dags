@@ -5,10 +5,6 @@ from slack_sdk import WebClient
 import os
 
 def send_slack_message():
-    """
-    Простая функция для отправки сообщения в Slack
-    Токен берется из переменной окружения SLACK_TOKEN
-    """
     # Получение токена из переменной окружения
     slack_token = os.environ.get('SLACK_TOKEN')
     if not slack_token:
