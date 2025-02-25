@@ -54,11 +54,44 @@ class DAGUpdateDBMonitor:
         
         # Query the database for recently updated DAGs
         with create_session() as session:
+            # Also check for significant time difference to avoid false positives
+            min_time_diff = timedelta(minutes=2)  # Ignore updates that are very recent
+            
             query = session.query(DagModel).filter(
                 DagModel.last_parsed_time > self.last_check_time
             )
             
+            # Store currently processed DAGs to avoid duplicates
+            processed_dag_ids = set()
+            
             for dag_model in query.all():
+                # Ignore DAGs that have already been processed in this run
+                if dag_model.dag_id in processed_dag_ids:
+                    continue
+                
+                # Ignore own monitor dag to avoid endless notification loop
+                if dag_model.dag_id == "monitor_dag_updates":
+                    continue
+                
+                # Add to processed set
+                processed_dag_ids.add(dag_model.dag_id)
+                
+                # Check if the file was actually modified by comparing file modification time
+                file_path = dag_model.fileloc
+                try:
+                    # Get the file's modification time (if accessible)
+                    file_mod_time = os.path.getmtime(file_path)
+                    file_mod_datetime = make_aware(datetime.fromtimestamp(file_mod_time))
+                    
+                    # If the file modification time is older than last check by a significant margin,
+                    # this might be a false positive - skip it
+                    if file_mod_datetime < (self.last_check_time - min_time_diff):
+                        print(f"Skipping {dag_model.dag_id}: file not recently modified")
+                        continue
+                except Exception as e:
+                    # If we can't access the file, rely on database information
+                    print(f"Could not check modification time for {file_path}: {e}")
+                
                 updated_dags.append({
                     'dag_id': dag_model.dag_id,
                     'fileloc': dag_model.fileloc,
@@ -163,7 +196,10 @@ class DAGUpdateDBMonitor:
         # Send notification if there are any changes
         if updated_dags or removed_dags:
             print(f"Found {len(updated_dags)} updated DAGs and {len(removed_dags)} removed DAGs")
-            self.notify_slack(updated_dags, removed_dags)
+            if len(updated_dags) > 0 or len(removed_dags) > 0:
+                self.notify_slack(updated_dags, removed_dags)
+            else:
+                print("Skipping notification as no significant changes were found")
         else:
             print("No changes detected")
         
