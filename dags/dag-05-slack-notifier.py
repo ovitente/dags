@@ -160,8 +160,8 @@ dag = DAG(
 check_updates = PythonOperator(
     task_id='check_dag_updates',
     python_callable=DagUpdateMonitor(
-        slack_token="ваш-токен",
-        channel="#ваш-канал",
+        slack_token="xoxe.xoxp-1-Mi0yLTg1MDUxMzMzMDU0MTEtODUwNTEzMzM1MTU3MS04NDk3OTA5OTUyMzkwLTg1MDAyMDk0ODg0NzAtOGRjN2Y2YjllZWQ0YmM2YjlkMDgyZDQyOWQ2ZDY4YTMzMDcyYzgzMThhZWE0MWRjYThiNjMyMjg4MjdkOThlNQ",
+        channel="#alerts",
         dag_folder="/opt/airflow/dags/repo/dags"
     ).check_updates,
     dag=dag
