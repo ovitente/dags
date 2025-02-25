@@ -2,16 +2,18 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.models import DagModel, DagBag, Variable
 from airflow.utils.db import create_session
-from airflow.utils.state import State
 from airflow.utils.timezone import utcnow, make_aware
 from slack_sdk import WebClient
 import os
+import json
+import hashlib
 from datetime import datetime, timedelta
 
-class DAGUpdateDBMonitor:
+class DAGFileHashMonitor:
     """
-    A class to monitor DAG updates using Airflow's database.
-    This approach doesn't require storing state in files and works reliably in Kubernetes.
+    A monitor that tracks DAG updates by hashing file contents
+    and comparing with previous hashes stored in Airflow Variables.
+    This is more reliable than using DB timestamps.
     """
     def __init__(self, slack_token=None, slack_channel=None):
         """
@@ -25,15 +27,12 @@ class DAGUpdateDBMonitor:
         self.slack_token = slack_token or os.environ.get('SLACK_TOKEN')
         self.slack_channel = slack_channel or os.environ.get('SLACK_CHANNEL', '#alerts')
         
-        # Get the last check time from Airflow Variables or use default
-        try:
-            last_check_str = Variable.get('dag_monitor_last_check_time')
-            self.last_check_time = make_aware(datetime.fromisoformat(last_check_str))
-            print(f"Retrieved last check time from Variable: {self.last_check_time}")
-        except (KeyError, ValueError):
-            # Default to 10 minutes ago if no previous record exists
-            self.last_check_time = utcnow() - timedelta(minutes=10)
-            print(f"No previous check time found, using default: {self.last_check_time}")
+        # Get DAG folder path from Airflow config
+        from airflow.configuration import conf
+        self.dag_folder = os.path.expanduser(conf.get('core', 'dags_folder'))
+        
+        # Variable name for storing DAG file hashes
+        self.hash_var_name = 'dag_file_hashes'
         
         # Initialize Slack client if token is available
         if self.slack_token:
@@ -42,132 +41,190 @@ class DAGUpdateDBMonitor:
             print("WARNING: No Slack token provided. Notifications will not be sent.")
             self.slack_client = None
     
-    def get_updated_dags(self):
+    def get_dag_files(self):
         """
-        Get DAGs that were updated since the last check.
-        Uses Airflow's database to determine what changed.
+        Get all Python files in the DAG folder.
         
         Returns:
-            list: List of updated DAG objects with metadata
+            dict: Dictionary of {dag_id: file_path}
         """
-        updated_dags = []
+        # Load all DAGs to get their IDs and file paths
+        dagbag = DagBag(self.dag_folder)
         
-        # Query the database for recently updated DAGs
-        with create_session() as session:
-            # Also check for significant time difference to avoid false positives
-            min_time_diff = timedelta(minutes=2)  # Ignore updates that are very recent
-            
-            query = session.query(DagModel).filter(
-                DagModel.last_parsed_time > self.last_check_time
-            )
-            
-            # Store currently processed DAGs to avoid duplicates
-            processed_dag_ids = set()
-            
-            for dag_model in query.all():
-                # Ignore DAGs that have already been processed in this run
-                if dag_model.dag_id in processed_dag_ids:
-                    continue
-                
-                # Ignore own monitor dag to avoid endless notification loop
-                if dag_model.dag_id == "monitor_dag_updates":
-                    continue
-                
-                # Add to processed set
-                processed_dag_ids.add(dag_model.dag_id)
-                
-                # Check if the file was actually modified by comparing file modification time
-                file_path = dag_model.fileloc
-                try:
-                    # Get the file's modification time (if accessible)
-                    file_mod_time = os.path.getmtime(file_path)
-                    file_mod_datetime = make_aware(datetime.fromtimestamp(file_mod_time))
-                    
-                    # If the file modification time is older than last check by a significant margin,
-                    # this might be a false positive - skip it
-                    if file_mod_datetime < (self.last_check_time - min_time_diff):
-                        print(f"Skipping {dag_model.dag_id}: file not recently modified")
-                        continue
-                except Exception as e:
-                    # If we can't access the file, rely on database information
-                    print(f"Could not check modification time for {file_path}: {e}")
-                
-                updated_dags.append({
-                    'dag_id': dag_model.dag_id,
-                    'fileloc': dag_model.fileloc,
-                    'last_parsed_time': dag_model.last_parsed_time,
-                    'owners': dag_model.owners,
-                    'schedule_interval': dag_model.schedule_interval
-                })
+        dag_files = {}
+        for dag_id, dag in dagbag.dags.items():
+            # Skip monitor DAG to avoid notification loop
+            if dag_id == "monitor_dag_updates":
+                continue
+            dag_files[dag_id] = dag.fileloc
         
-        return updated_dags
+        return dag_files
     
-    def get_removed_dags(self):
+    def compute_file_hash(self, file_path):
         """
-        Get DAGs that were removed from the system.
-        
-        Returns:
-            list: List of removed DAG IDs
-        """
-        removed_dags = []
-        
-        with create_session() as session:
-            # Find DAGs that are no longer present in the files
-            query = session.query(DagModel).filter(
-                DagModel.is_active == False,
-                DagModel.is_subdag == False
-            )
-            
-            for dag_model in query.all():
-                # Only include if it was active before our last check
-                # and is now marked as inactive
-                if dag_model.last_parsed_time and dag_model.last_parsed_time > self.last_check_time:
-                    removed_dags.append({
-                        'dag_id': dag_model.dag_id,
-                        'fileloc': dag_model.fileloc
-                    })
-        
-        return removed_dags
-    
-    def notify_slack(self, updated_dags, removed_dags):
-        """
-        Send notification to Slack about DAG updates.
+        Compute MD5 hash of a file's contents.
         
         Args:
-            updated_dags (list): List of updated DAG objects
-            removed_dags (list): List of removed DAG objects
+            file_path (str): Path to the file
+            
+        Returns:
+            str: MD5 hash of the file contents
+        """
+        try:
+            with open(file_path, 'rb') as f:
+                return hashlib.md5(f.read()).hexdigest()
+        except Exception as e:
+            print(f"Error computing hash for {file_path}: {e}")
+            return None
+    
+    def get_current_hashes(self, dag_files):
+        """
+        Compute hashes for all DAG files.
+        
+        Args:
+            dag_files (dict): Dictionary of {dag_id: file_path}
+            
+        Returns:
+            dict: Dictionary of {dag_id: {file_path, hash}}
+        """
+        hashes = {}
+        for dag_id, file_path in dag_files.items():
+            file_hash = self.compute_file_hash(file_path)
+            if file_hash:
+                hashes[dag_id] = {
+                    'file_path': file_path,
+                    'hash': file_hash
+                }
+        return hashes
+    
+    def get_previous_hashes(self):
+        """
+        Get previously stored DAG file hashes from Airflow Variable.
+        
+        Returns:
+            dict: Dictionary of {dag_id: {file_path, hash}}
+        """
+        try:
+            hash_json = Variable.get(self.hash_var_name)
+            return json.loads(hash_json)
+        except (KeyError, ValueError, json.JSONDecodeError) as e:
+            print(f"No previous hashes found or error parsing: {e}")
+            return {}
+    
+    def save_current_hashes(self, hashes):
+        """
+        Save current DAG file hashes to Airflow Variable.
+        
+        Args:
+            hashes (dict): Dictionary of {dag_id: {file_path, hash}}
+        """
+        try:
+            Variable.set(self.hash_var_name, json.dumps(hashes))
+            print(f"Saved {len(hashes)} file hashes to Variable '{self.hash_var_name}'")
+        except Exception as e:
+            print(f"Error saving hashes to Variable: {e}")
+    
+    def get_dag_metadata(self, dag_id):
+        """
+        Get metadata for a specific DAG from Airflow database.
+        
+        Args:
+            dag_id (str): ID of the DAG
+            
+        Returns:
+            dict: Metadata for the DAG
+        """
+        with create_session() as session:
+            dag_model = session.query(DagModel).filter(DagModel.dag_id == dag_id).first()
+            if dag_model:
+                return {
+                    'owners': dag_model.owners,
+                    'schedule_interval': dag_model.schedule_interval,
+                    'last_parsed_time': dag_model.last_parsed_time
+                }
+        return None
+    
+    def detect_changes(self, prev_hashes, curr_hashes):
+        """
+        Detect changes between previous and current hashes.
+        
+        Args:
+            prev_hashes (dict): Previous hashes
+            curr_hashes (dict): Current hashes
+            
+        Returns:
+            tuple: (added_dags, modified_dags, removed_dags)
+        """
+        added_dags = []
+        modified_dags = []
+        removed_dags = []
+        
+        # Find added and modified DAGs
+        for dag_id, data in curr_hashes.items():
+            if dag_id not in prev_hashes:
+                # New DAG
+                added_dags.append(dag_id)
+            elif data['hash'] != prev_hashes[dag_id]['hash']:
+                # Modified DAG
+                modified_dags.append(dag_id)
+        
+        # Find removed DAGs
+        for dag_id in prev_hashes:
+            if dag_id not in curr_hashes:
+                removed_dags.append(dag_id)
+        
+        return added_dags, modified_dags, removed_dags
+    
+    def notify_slack(self, added_dags, modified_dags, removed_dags):
+        """
+        Send notification to Slack about DAG changes.
+        
+        Args:
+            added_dags (list): List of new DAG IDs
+            modified_dags (list): List of modified DAG IDs
+            removed_dags (list): List of removed DAG IDs
         """
         if not self.slack_client:
             print("Slack client not initialized. Skipping notification.")
             return
-            
-        if not updated_dags and not removed_dags:
+        
+        if not added_dags and not modified_dags and not removed_dags:
             print("No changes to report")
             return
         
         # Create the message
-        message = f"🔄 *Обнаружены обновления DAG*\n"
+        message = f"🔄 *Обнаружены изменения в DAG'ах*\n"
         message += f"Время: {utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n\n"
         
-        # Add updated DAGs section
-        if updated_dags:
-            message += "*Обновленные DAG'и:*\n"
-            for dag in updated_dags:
-                # Get just the filename from the path
-                file_name = os.path.basename(dag['fileloc'])
-                
-                message += f"• *{dag['dag_id']}*\n"
-                message += f"  - Файл: `{file_name}`\n"
-                message += f"  - Расписание: `{dag['schedule_interval'] or 'None'}`\n"
-                message += f"  - Владелец: {dag['owners'] or 'None'}\n"
-                message += f"  - Обновлен: {dag['last_parsed_time'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+        # Added DAGs section
+        if added_dags:
+            message += "*Новые DAG'и:*\n"
+            for dag_id in added_dags:
+                metadata = self.get_dag_metadata(dag_id)
+                if metadata:
+                    message += f"• *{dag_id}*\n"
+                    message += f"  - Файл: `{os.path.basename(curr_hashes[dag_id]['file_path'])}`\n"
+                    message += f"  - Расписание: `{metadata['schedule_interval'] or 'None'}`\n"
+                    message += f"  - Владелец: {metadata['owners'] or 'None'}\n"
         
-        # Add removed DAGs section
+        # Modified DAGs section
+        if modified_dags:
+            message += "\n*Измененные DAG'и:*\n"
+            for dag_id in modified_dags:
+                metadata = self.get_dag_metadata(dag_id)
+                if metadata:
+                    message += f"• *{dag_id}*\n"
+                    message += f"  - Файл: `{os.path.basename(curr_hashes[dag_id]['file_path'])}`\n"
+                    message += f"  - Расписание: `{metadata['schedule_interval'] or 'None'}`\n"
+                    message += f"  - Владелец: {metadata['owners'] or 'None'}\n"
+        
+        # Removed DAGs section
         if removed_dags:
             message += "\n*Удаленные DAG'и:*\n"
-            for dag in removed_dags:
-                message += f"• *{dag['dag_id']}*\n"
-                message += f"  - Файл: `{os.path.basename(dag['fileloc'])}`\n"
+            for dag_id in removed_dags:
+                file_path = prev_hashes[dag_id]['file_path']
+                message += f"• *{dag_id}*\n"
+                message += f"  - Файл: `{os.path.basename(file_path)}`\n"
         
         # Send the message
         try:
@@ -184,29 +241,34 @@ class DAGUpdateDBMonitor:
         """
         Main method to check for DAG updates and send notifications.
         """
-        print(f"Checking for DAG updates since {self.last_check_time}...")
+        print(f"Checking for DAG updates in {self.dag_folder}...")
         
-        # Store the current time to use in the next run
-        current_time = utcnow()
+        # Get all DAG files
+        dag_files = self.get_dag_files()
+        print(f"Found {len(dag_files)} DAGs in the system")
         
-        # Get updated and removed DAGs
-        updated_dags = self.get_updated_dags()
-        removed_dags = self.get_removed_dags()
+        # Get previous file hashes
+        global prev_hashes
+        prev_hashes = self.get_previous_hashes()
+        print(f"Loaded {len(prev_hashes)} previous file hashes")
         
-        # Send notification if there are any changes
-        if updated_dags or removed_dags:
-            print(f"Found {len(updated_dags)} updated DAGs and {len(removed_dags)} removed DAGs")
-            if len(updated_dags) > 0 or len(removed_dags) > 0:
-                self.notify_slack(updated_dags, removed_dags)
-            else:
-                print("Skipping notification as no significant changes were found")
+        # Compute current file hashes
+        global curr_hashes
+        curr_hashes = self.get_current_hashes(dag_files)
+        print(f"Computed {len(curr_hashes)} current file hashes")
+        
+        # Detect changes
+        added_dags, modified_dags, removed_dags = self.detect_changes(prev_hashes, curr_hashes)
+        
+        # Send notification if there are changes
+        if added_dags or modified_dags or removed_dags:
+            print(f"Found {len(added_dags)} new DAGs, {len(modified_dags)} modified DAGs, and {len(removed_dags)} removed DAGs")
+            self.notify_slack(added_dags, modified_dags, removed_dags)
         else:
-            print("No changes detected")
+            print("No changes detected in DAG files")
         
-        # Update the last check time for the next run and save to Variables
-        self.last_check_time = current_time
-        Variable.set('dag_monitor_last_check_time', current_time.isoformat())
-        print(f"Saved current time to Variable: {current_time}")
+        # Save current hashes for next run
+        self.save_current_hashes(curr_hashes)
 
 
 # Define the DAG
@@ -223,13 +285,13 @@ default_args = {
 dag = DAG(
     'monitor_dag_updates',
     default_args=default_args,
-    description='Monitor DAG updates using Airflow DB and send notifications to Slack',
+    description='Monitor DAG updates using file hashing and send notifications to Slack',
     schedule_interval='*/5 * * * *',  # Run every 5 minutes
     catchup=False
 )
 
 # Create task to check for updates
-monitor = DAGUpdateDBMonitor()
+monitor = DAGFileHashMonitor()
 check_updates_task = PythonOperator(
     task_id='check_dag_updates',
     python_callable=monitor.check_updates,
