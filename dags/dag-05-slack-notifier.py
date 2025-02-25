@@ -8,7 +8,7 @@ def send_slack_message():
     Простая функция для отправки сообщения в Slack
     """
     # Инициализация Slack клиента
-    slack_token = "xoxe.xoxp-1-Mi0yLTg1MDUxMzMzMDU0MTEtODUwNTEzMzM1MTU3MS04NDk3OTA5OTUyMzkwLTg1MDAyMDk0ODg0NzAtOGRjN2Y2YjllZWQ0YmM2YjlkMDgyZDQyOWQ2ZDY4YTMzMDcyYzgzMThhZWE0MWRjYThiNjMyMjg4MjdkOThlNQ"
+    slack_token = "xoxe-1-My0xLTg1MDUxMzMzMDU0MTEtODQ5NzkwOTk1MjM5MC04NTAwMjA5NDg4NTgyLTdhNGM2MzUzYzc0NTA4MGRkODMyYjVmMGY2Yzc5OTYyNDY3YThjOWYwMmRkZWM4Y2ZmMDE4NDljMWFkZTlmNTY"
     slack_channel = "#alerts"
     
     client = WebClient(token=slack_token)
