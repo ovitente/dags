@@ -12,7 +12,6 @@ def print_all_env_vars():
     @task
     def print_env_vars():
         """Выводит все переменные окружения, соответствующие JSON ключам."""
-        # Ключи из предоставленного JSON
         env_vars = [
             "al_creative_db_id",
             "applovin_api_key",
