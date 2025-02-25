@@ -1,8 +1,9 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.models import DagModel, DagBag
+from airflow.models import DagModel, DagBag, Variable
 from airflow.utils.db import create_session
 from airflow.utils.state import State
+from airflow.utils.timezone import utcnow, make_aware
 from slack_sdk import WebClient
 import os
 from datetime import datetime, timedelta
@@ -24,8 +25,15 @@ class DAGUpdateDBMonitor:
         self.slack_token = slack_token or os.environ.get('SLACK_TOKEN')
         self.slack_channel = slack_channel or os.environ.get('SLACK_CHANNEL', '#alerts')
         
-        # Track when this monitor last ran
-        self.last_check_time = datetime.now() - timedelta(minutes=10)
+        # Get the last check time from Airflow Variables or use default
+        try:
+            last_check_str = Variable.get('dag_monitor_last_check_time')
+            self.last_check_time = make_aware(datetime.fromisoformat(last_check_str))
+            print(f"Retrieved last check time from Variable: {self.last_check_time}")
+        except (KeyError, ValueError):
+            # Default to 10 minutes ago if no previous record exists
+            self.last_check_time = utcnow() - timedelta(minutes=10)
+            print(f"No previous check time found, using default: {self.last_check_time}")
         
         # Initialize Slack client if token is available
         if self.slack_token:
@@ -106,7 +114,7 @@ class DAGUpdateDBMonitor:
         
         # Create the message
         message = f"🔄 *Обнаружены обновления DAG*\n"
-        message += f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        message += f"Время: {utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n\n"
         
         # Add updated DAGs section
         if updated_dags:
@@ -146,7 +154,7 @@ class DAGUpdateDBMonitor:
         print(f"Checking for DAG updates since {self.last_check_time}...")
         
         # Store the current time to use in the next run
-        current_time = datetime.now()
+        current_time = utcnow()
         
         # Get updated and removed DAGs
         updated_dags = self.get_updated_dags()
@@ -159,15 +167,17 @@ class DAGUpdateDBMonitor:
         else:
             print("No changes detected")
         
-        # Update the last check time for the next run
+        # Update the last check time for the next run and save to Variables
         self.last_check_time = current_time
+        Variable.set('dag_monitor_last_check_time', current_time.isoformat())
+        print(f"Saved current time to Variable: {current_time}")
 
 
 # Define the DAG
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
-    'start_date': datetime(2024, 2, 25),
+    'start_date': datetime(2024, 2, 25, tzinfo=utcnow().tzinfo),
     'email_on_failure': False,
     'email_on_retry': False,
     'retries': 1,
