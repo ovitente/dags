@@ -1,7 +1,122 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.models import DagBag, DagModel
+from airflow.utils.db import create_session
+from airflow.configuration import conf
+from slack_sdk import WebClient
+import git
+import os
+import json
 from datetime import datetime, timedelta
 
+# Полный класс DagUpdateMonitor внутри DAG файла
+class DagUpdateMonitor:
+    def __init__(self, slack_token, channel, dag_folder):
+        """
+        Initialize the DAG update monitor
+        
+        Args:
+            slack_token (str): Slack bot token
+            channel (str): Slack channel to send notifications to
+            dag_folder (str): Path to the DAG folder
+        """
+        self.slack_client = WebClient(token=slack_token)
+        self.channel = channel
+        self.dag_folder = dag_folder
+        self.state_file = '/opt/airflow/last_commit.json'
+        
+    def get_last_commit(self):
+        """Get the last processed commit hash"""
+        if os.path.exists(self.state_file):
+            with open(self.state_file, 'r') as f:
+                return json.load(f)['last_commit']
+        return None
+        
+    def save_last_commit(self, commit_hash):
+        """Save the last processed commit hash"""
+        with open(self.state_file, 'w') as f:
+            json.dump({'last_commit': commit_hash}, f)
+            
+    def get_changed_dags(self, old_commit, new_commit):
+        """
+        Get list of DAGs that were changed between commits
+        """
+        repo = git.Repo(self.dag_folder)
+        changed_files = []
+        
+        if old_commit:
+            diff = repo.git.diff(old_commit, new_commit, name_only=True)
+            changed_files = [f for f in diff.split('\n') if f.endswith('.py')]
+        else:
+            # First run - consider all .py files as changed
+            changed_files = [f for f in os.listdir(self.dag_folder) if f.endswith('.py')]
+            
+        return changed_files
+        
+    def load_dags(self):
+        """Load DAGs and return DAG objects"""
+        dagbag = DagBag(self.dag_folder)
+        if dagbag.import_errors:
+            self.notify_error(dagbag.import_errors)
+            return None
+        return dagbag.dags
+        
+    def notify_update(self, changed_files, new_dags):
+        """
+        Send notification to Slack about DAG updates
+        """
+        message = f"🔄 *DAG обновления обнаружены*\n"
+        message += f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        
+        message += "*Измененные файлы:*\n"
+        for file in changed_files:
+            message += f"• {file}\n"
+            
+        message += "\n*Обновленные DAG'и:*\n"
+        for dag_id in new_dags:
+            dag = new_dags[dag_id]
+            message += f"• {dag_id}\n"
+            message += f"  - График: {dag.schedule_interval}\n"
+            message += f"  - Владелец: {dag.owner}\n"
+            
+        self.slack_client.chat_postMessage(
+            channel=self.channel,
+            text=message,
+            mrkdwn=True
+        )
+        
+    def notify_error(self, errors):
+        """
+        Send notification about import errors
+        """
+        message = "❌ *Ошибки при импорте DAG'ов*\n\n"
+        for filename, error in errors.items():
+            message += f"*Файл:* {filename}\n"
+            message += f"*Ошибка:* ```{error}```\n\n"
+            
+        self.slack_client.chat_postMessage(
+            channel=self.channel,
+            text=message,
+            mrkdwn=True
+        )
+        
+    def check_updates(self):
+        """
+        Main method to check for updates and send notifications
+        """
+        repo = git.Repo(self.dag_folder)
+        current_commit = repo.head.commit.hexsha
+        last_commit = self.get_last_commit()
+        
+        if current_commit != last_commit:
+            changed_files = self.get_changed_dags(last_commit, current_commit)
+            if changed_files:
+                new_dags = self.load_dags()
+                if new_dags:
+                    self.notify_update(changed_files, new_dags)
+                    self.save_last_commit(current_commit)
+
+# Определение DAG
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
@@ -13,16 +128,17 @@ default_args = {
 dag = DAG(
     'monitor_dag_updates',
     default_args=default_args,
-    schedule_interval='*/10 * * * *',  
+    schedule_interval='*/10 * * * *',  # Проверка каждые 10 минут
     catchup=False
 )
 
+# Создаём оператор
 check_updates = PythonOperator(
     task_id='check_dag_updates',
     python_callable=DagUpdateMonitor(
         slack_token="xoxe.xoxp-1-Mi0yLTg1MDUxMzMzMDU0MTEtODUwNTEzMzM1MTU3MS04NDk3OTA5OTUyMzkwLTg0OTc5MDk5ODQ2OTQtNDJhNzFmNTgzY2E0ZGI2M2NiY2IzYWYwNGI4ZmFiODI2MjdhMWQwYzNlYTc2ZDZmZmQ0OGZmOGNjNmEyZjQ3NQ",
         channel="#alerts",
-        dag_folder="/opt/airflow/dags"
+        dag_folder="/opt/airflow/dags/repo/dags"
     ).check_updates,
     dag=dag
 )
