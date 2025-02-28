@@ -10,11 +10,6 @@ import hashlib
 from datetime import datetime, timedelta
 
 class DAGFileHashMonitor:
-    """
-    A monitor that tracks DAG updates by hashing file contents
-    and comparing with previous hashes stored in Airflow Variables.
-    This is more reliable than using DB timestamps.
-    """
     def __init__(self, slack_token=None, slack_channel=None):
         """
         Initialize the DAG update monitor.
@@ -38,7 +33,7 @@ class DAGFileHashMonitor:
         if self.slack_token:
             self.slack_client = WebClient(token=self.slack_token)
         else:
-            print("WARNING: No Slack token provided. Notifications will not be sent.")
+            print("WARNING: No SLACK token provided. Notifications will not be sent.")
             self.slack_client = None
     
     def get_dag_files(self):
