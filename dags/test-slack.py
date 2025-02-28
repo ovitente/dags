@@ -8,7 +8,7 @@ def send_slack_message():
     # Получение токена из переменной окружения
     slack_token = os.environ.get('SLACK_TOKEN')
     if not slack_token:
-        raise ValueError("Переменная окружения SLACK_TOKEN не установлена")
+        raise ValueError("VARIABLER окружения SLACK_TOKEN не установлена")
     
     slack_channel = os.environ.get('SLACK_CHANNEL', '#alerts')
     
